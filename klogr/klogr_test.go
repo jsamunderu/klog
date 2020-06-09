@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/klog/v2"
+	"gitbug.com/jsamunderu/klog/v2"
 
 	"github.com/go-logr/logr"
 )

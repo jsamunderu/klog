@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 
-	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
+	"github.com/jsamunderu/klog/v2"
+	"github.com/jsamunderu/klog/v2/klogr"
 )
 
 type myError struct {
