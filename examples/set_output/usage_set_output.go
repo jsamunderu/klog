@@ -19,6 +19,8 @@ func main() {
 	buf := new(bytes.Buffer)
 	klog.SetOutput(buf)
 	klog.Info("nice to meet you")
+	klog.InfoS("nice to meet you")
+	klog.InfoS("nice to meet you", "key", "value")
 	klog.Flush()
 
 	fmt.Printf("LOGGED: %s", buf.String())
