@@ -617,7 +617,21 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 	}
 	frames := runtime.CallersFrames([]uintptr{pc})
 	frame, _ := frames.Next()
-	return l.addFuncToHeader(l.formatHeader(s, file, line), frame.Function), file, line
+	return l.addFuncToHeader(l.formatHeader(s, file, line), stripUrl(frame.Function)), file, line
+}
+
+func stripUrl(str string) string {
+	if i := strings.LastIndexByte(str, '/'); i != -1 {
+		if str[i+1] == 'v' || str[i+1] == 'V' {
+			j := strings.LastIndexByte(str[i+2:], '.')
+			if _, err := strconv.Atoi(str[i+2 : i+j+1]); err != nil {
+				for i = i - 1; i > 0 && str[i] != '/'; i-- {
+				}
+			}
+		}
+		return str[i+1:]
+	}
+	return str
 }
 
 // formatHeader formats a log header using the provided file name and line number.
@@ -717,11 +731,11 @@ func (buf *buffer) nDigits(n, i, d int, pad byte) {
 }
 
 func (buf *buffer) ncopy(beg, lim int, str string) {
-	index := 0;
+	index := 0
 	for ; index < lim && index < len(str); index++ {
-		buf.tmp[beg + index] = str[index]
+		buf.tmp[beg+index] = str[index]
 	}
-	for ; index < lim; {
+	for index < lim {
 		index += 1
 		buf.tmp[index] = ' '
 	}
