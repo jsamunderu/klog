@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/jsamunderu/klog"
+	"github.com/jsamunderu/klog/v2"
 )
 
 func main() {
