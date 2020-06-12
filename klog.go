@@ -411,6 +411,10 @@ func init() {
 	logging.toStderr = true
 	logging.alsoToStderr = false
 	logging.skipHeaders = false
+	logging.skipSeverityHeaders = false
+	logging.skipTimeHeaders = false
+	logging.skipPidHeaders = false
+	logging.skipCallerFunction = false
 	logging.addDirHeader = false
 	logging.skipLogHeaders = false
 	go logging.flushDaemon()
@@ -432,6 +436,10 @@ func InitFlags(flagset *flag.FlagSet) {
 	flagset.Var(&logging.verbosity, "v", "number for the log level verbosity")
 	flagset.BoolVar(&logging.addDirHeader, "add_dir_header", logging.addDirHeader, "If true, adds the file directory to the header of the log messages")
 	flagset.BoolVar(&logging.skipHeaders, "skip_headers", logging.skipHeaders, "If true, avoid header prefixes in the log messages")
+	flagset.BoolVar(&logging.skipSeverityHeaders, "skip_severity_headers", logging.skipSeverityHeaders, "If true, avoid severity header prefixes in the log messages")
+	flagset.BoolVar(&logging.skipTimeHeaders, "skip_time_headers", logging.skipTimeHeaders, "If true, avoid time header prefixes in the log messages")
+	flagset.BoolVar(&logging.skipPidHeaders, "skip_pid_headers", logging.skipPidHeaders, "If true, avoid header pid prefixes in the log messages")
+	flagset.BoolVar(&logging.skipCallerFunction, "skip_caller_function", logging.skipCallerFunction, "If true, avoid showing the calling function in the log messages")
 	flagset.BoolVar(&logging.skipLogHeaders, "skip_log_headers", logging.skipLogHeaders, "If true, avoid headers when opening log files")
 	flagset.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flagset.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
@@ -497,6 +505,18 @@ type loggingT struct {
 	// If true, do not add the prefix headers, useful when used with SetOutput
 	skipHeaders bool
 
+	// If true, do not add the serverity header to log files
+	skipSeverityHeaders bool
+
+	// If true, do not add the time header to log files
+	skipTimeHeaders bool
+
+	// If true, do not add the pid header to log files
+	skipPidHeaders bool
+
+	// If true, do not add the calling function to the log files
+	skipCallerFunction bool
+
 	// If true, do not add the headers to log files
 	skipLogHeaders bool
 
@@ -510,8 +530,9 @@ type loggingT struct {
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
 type buffer struct {
 	bytes.Buffer
-	tmp  [64]byte // temporary byte array for creating headers.
-	next *buffer
+	tmp    [64]byte // temporary byte array for creating headers.
+	tmpPos int
+	next   *buffer
 }
 
 var logging loggingT
@@ -584,8 +605,8 @@ where the fields are defined as follows:
 	line             The line number
 	msg              The user-supplied message
 */
-func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
-	_, file, line, ok := runtime.Caller(3 + depth)
+func (l *loggingT) header(s severity, depth int) (*buffer, string, int, string) {
+	pc, file, line, ok := runtime.Caller(3 + depth)
 	if !ok {
 		file = "???"
 		line = 1
@@ -600,7 +621,8 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 			}
 		}
 	}
-	return l.formatHeader(s, file, line), file, line
+	fn := runtime.FuncForPC(pc)
+	return l.formatHeader(s, file, line), file, line, fn.Name()
 }
 
 // formatHeader formats a log header using the provided file name and line number.
@@ -622,57 +644,76 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	_, month, day := now.Date()
 	hour, minute, second := now.Clock()
 	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
-	buf.tmp[0] = severityChar[s]
-	buf.twoDigits(1, int(month))
-	buf.twoDigits(3, day)
-	buf.tmp[5] = ' '
-	buf.twoDigits(6, hour)
-	buf.tmp[8] = ':'
-	buf.twoDigits(9, minute)
-	buf.tmp[11] = ':'
-	buf.twoDigits(12, second)
-	buf.tmp[14] = '.'
-	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
-	buf.tmp[21] = ' '
-	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
-	buf.tmp[29] = ' '
-	buf.Write(buf.tmp[:30])
+	buf.clear()
+	if !l.skipSeverityHeaders {
+		buf.addByte(severityChar[s])
+		buf.addTwoDigits(int(month))
+		buf.addTwoDigits(day)
+		buf.addByte(' ')
+	}
+	if !l.skipTimeHeaders {
+		buf.addTwoDigits(hour)
+		buf.addByte(':')
+		buf.addTwoDigits(minute)
+		buf.addByte(':')
+		buf.addTwoDigits(second)
+		buf.addByte('.')
+		buf.addNDigits(6, now.Nanosecond()/1000, '0')
+		buf.addByte(' ')
+	}
+	if !l.skipPidHeaders {
+		buf.addNDigits(7, pid, ' ') // TODO: should be TID
+		buf.addByte(' ')
+	}
+	buf.Write(buf.tmp[:buf.tmpPos])
 	buf.WriteString(file)
-	buf.tmp[0] = ':'
-	n := buf.someDigits(1, line)
-	buf.tmp[n+1] = ']'
-	buf.tmp[n+2] = ' '
-	buf.Write(buf.tmp[:n+3])
+
+	buf.clear()
+	buf.addByte(':')
+	buf.addSomeDigits(line)
+	buf.addByte(']')
+	buf.addByte(' ')
+	buf.Write(buf.tmp[:buf.tmpPos])
 	return buf
 }
 
 // Some custom tiny helper functions to print the log header efficiently.
 
-const digits = "0123456789"
-
-// twoDigits formats a zero-prefixed two-digit integer at buf.tmp[i].
-func (buf *buffer) twoDigits(i, d int) {
-	buf.tmp[i+1] = digits[d%10]
-	d /= 10
-	buf.tmp[i] = digits[d%10]
+func (buf *buffer) addString(str string) {
+	n := len(str)
+	for i := 0; i < n; i++ {
+		buf.tmp[buf.tmpPos+i] = str[i]
+	}
+	buf.tmpPos += n
 }
 
-// nDigits formats an n-digit integer at buf.tmp[i],
+const digits = "0123456789"
+
+// twoDigits formats a zero-prefixed two-digit integer at buf.tmp[current_pos].
+func (buf *buffer) addTwoDigits(d int) {
+	buf.tmp[buf.tmpPos+1] = digits[d%10]
+	d /= 10
+	buf.tmp[buf.tmpPos] = digits[d%10]
+	buf.tmpPos += 2
+}
+
+// nDigits formats an n-digit integer at buf.tmp[current_pos],
 // padding with pad on the left.
 // It assumes d >= 0.
-func (buf *buffer) nDigits(n, i, d int, pad byte) {
+func (buf *buffer) addNDigits(n, d int, pad byte) {
 	j := n - 1
 	for ; j >= 0 && d > 0; j-- {
-		buf.tmp[i+j] = digits[d%10]
+		buf.tmp[buf.tmpPos+j] = digits[d%10]
 		d /= 10
 	}
 	for ; j >= 0; j-- {
-		buf.tmp[i+j] = pad
+		buf.tmp[buf.tmpPos+j] = pad
 	}
+	buf.tmpPos += n
 }
 
-// someDigits formats a zero-prefixed variable-width integer at buf.tmp[i].
-func (buf *buffer) someDigits(i, d int) int {
+// someDigits formats a zero-prefixed variable-width integer at buf.tmp[current_pos].
+func (buf *buffer) addSomeDigits(d int) {
 	// Print into the top, then copy down. We know there's space for at least
 	// a 10-digit number.
 	j := len(buf.tmp)
@@ -684,16 +725,32 @@ func (buf *buffer) someDigits(i, d int) int {
 			break
 		}
 	}
-	return copy(buf.tmp[i:], buf.tmp[j:])
+	buf.tmpPos += copy(buf.tmp[buf.tmpPos:], buf.tmp[j:])
+}
+
+// add one byte at buf.tmp[current_pos].
+func (buf *buffer) addByte(b byte) {
+	buf.tmp[buf.tmpPos] = b
+	buf.tmpPos += 1
+}
+
+// clear and truncate the tmp array.
+func (buf *buffer) clear() {
+	buf.tmpPos = 0
 }
 
 func (l *loggingT) println(s severity, logr logr.InfoLogger, args ...interface{}) {
-	buf, file, line := l.header(s, 0)
+	buf, file, line, callFunc := l.header(s, 0)
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logr != nil {
 		l.putBuffer(buf)
 		buf = l.getBuffer()
+	}
+	if !l.skipCallerFunction {
+		buf.WriteString("func=\"")
+		buf.WriteString(callFunc)
+		buf.WriteString("\" ")
 	}
 	fmt.Fprintln(buf, args...)
 	l.output(s, logr, buf, file, line, false)
@@ -704,12 +761,17 @@ func (l *loggingT) print(s severity, logr logr.InfoLogger, args ...interface{}) 
 }
 
 func (l *loggingT) printDepth(s severity, logr logr.InfoLogger, depth int, args ...interface{}) {
-	buf, file, line := l.header(s, depth)
+	buf, file, line, callFunc := l.header(s, depth)
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logr != nil {
 		l.putBuffer(buf)
 		buf = l.getBuffer()
+	}
+	if !l.skipCallerFunction {
+		buf.WriteString("func=\"")
+		buf.WriteString(callFunc)
+		buf.WriteString("\" ")
 	}
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
@@ -719,12 +781,17 @@ func (l *loggingT) printDepth(s severity, logr logr.InfoLogger, depth int, args 
 }
 
 func (l *loggingT) printf(s severity, logr logr.InfoLogger, format string, args ...interface{}) {
-	buf, file, line := l.header(s, 0)
+	buf, file, line, callFunc := l.header(s, 0)
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logr != nil {
 		l.putBuffer(buf)
 		buf = l.getBuffer()
+	}
+	if !l.skipCallerFunction {
+		buf.WriteString("func=\"")
+		buf.WriteString(callFunc)
+		buf.WriteString("\" ")
 	}
 	fmt.Fprintf(buf, format, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
@@ -1320,7 +1387,7 @@ func (v Verbose) Infof(format string, args ...interface{}) {
 // See the documentation of V for usage.
 func (v Verbose) InfoS(msg string, keysAndValues ...interface{}) {
 	if v.enabled {
-		logging.infoS(v.logr, msg, keysAndValues)
+		logging.infoS(v.logr, msg, keysAndValues...)
 	}
 }
 
