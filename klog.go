@@ -510,8 +510,9 @@ type loggingT struct {
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
 type buffer struct {
 	bytes.Buffer
-	tmp  [64]byte // temporary byte array for creating headers.
-	next *buffer
+	tmp    [64]byte // temporary byte array for creating headers.
+	tmpPos int
+	next   *buffer
 }
 
 var logging loggingT
@@ -622,27 +623,30 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	_, month, day := now.Date()
 	hour, minute, second := now.Clock()
 	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
-	buf.tmp[0] = severityChar[s]
-	buf.twoDigits(1, int(month))
-	buf.twoDigits(3, day)
-	buf.tmp[5] = ' '
-	buf.twoDigits(6, hour)
-	buf.tmp[8] = ':'
-	buf.twoDigits(9, minute)
-	buf.tmp[11] = ':'
-	buf.twoDigits(12, second)
-	buf.tmp[14] = '.'
-	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
-	buf.tmp[21] = ' '
-	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
-	buf.tmp[29] = ' '
-	buf.Write(buf.tmp[:30])
+	buf.clear()
+	buf.addByte(severityChar[s])
+	buf.addTwoDigits(int(month))
+	buf.addTwoDigits(day)
+	buf.addByte(' ')
+	buf.addTwoDigits(hour)
+	buf.addByte(':')
+	buf.addTwoDigits(minute)
+	buf.addByte(':')
+	buf.addTwoDigits(second)
+	buf.addByte('.')
+	buf.addNDigits(6, now.Nanosecond()/1000, '0')
+	buf.addByte(' ')
+	buf.addNDigits(7, pid, ' ') // TODO: should be TID
+	buf.addByte(' ')
+	buf.Write(buf.tmp[:buf.tmpPos])
 	buf.WriteString(file)
-	buf.tmp[0] = ':'
-	n := buf.someDigits(1, line)
-	buf.tmp[n+1] = ']'
-	buf.tmp[n+2] = ' '
-	buf.Write(buf.tmp[:n+3])
+
+	buf.clear()
+	buf.addByte(':')
+	buf.addSomeDigits(line)
+	buf.addByte(']')
+	buf.addByte(' ')
+	buf.Write(buf.tmp[:buf.tmpPos])
 	return buf
 }
 
@@ -650,29 +654,31 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 
 const digits = "0123456789"
 
-// twoDigits formats a zero-prefixed two-digit integer at buf.tmp[i].
-func (buf *buffer) twoDigits(i, d int) {
-	buf.tmp[i+1] = digits[d%10]
+// twoDigits formats a zero-prefixed two-digit integer at buf.tmp[current_pos].
+func (buf *buffer) addTwoDigits(d int) {
+	buf.tmp[buf.tmpPos+1] = digits[d%10]
 	d /= 10
-	buf.tmp[i] = digits[d%10]
+	buf.tmp[buf.tmpPos] = digits[d%10]
+	buf.tmpPos += 2
 }
 
-// nDigits formats an n-digit integer at buf.tmp[i],
+// nDigits formats an n-digit integer at buf.tmp[current_pos],
 // padding with pad on the left.
 // It assumes d >= 0.
-func (buf *buffer) nDigits(n, i, d int, pad byte) {
+func (buf *buffer) addNDigits(n, d int, pad byte) {
 	j := n - 1
 	for ; j >= 0 && d > 0; j-- {
-		buf.tmp[i+j] = digits[d%10]
+		buf.tmp[buf.tmpPos+j] = digits[d%10]
 		d /= 10
 	}
 	for ; j >= 0; j-- {
-		buf.tmp[i+j] = pad
+		buf.tmp[buf.tmpPos+j] = pad
 	}
+	buf.tmpPos += n
 }
 
-// someDigits formats a zero-prefixed variable-width integer at buf.tmp[i].
-func (buf *buffer) someDigits(i, d int) int {
+// someDigits formats a zero-prefixed variable-width integer at buf.tmp[current_pos].
+func (buf *buffer) addSomeDigits(d int) {
 	// Print into the top, then copy down. We know there's space for at least
 	// a 10-digit number.
 	j := len(buf.tmp)
@@ -684,7 +690,18 @@ func (buf *buffer) someDigits(i, d int) int {
 			break
 		}
 	}
-	return copy(buf.tmp[i:], buf.tmp[j:])
+	buf.tmpPos = copy(buf.tmp[buf.tmpPos:], buf.tmp[j:])
+}
+
+// add one byte at buf.tmp[current_pos].
+func (buf *buffer) addByte(b byte) {
+	buf.tmp[buf.tmpPos] = b
+	buf.tmpPos += 1
+}
+
+// clear and truncate the tmp array.
+func (buf *buffer) clear() {
+	buf.tmpPos = 0
 }
 
 func (l *loggingT) println(s severity, logr logr.InfoLogger, args ...interface{}) {
