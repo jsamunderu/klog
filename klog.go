@@ -413,9 +413,6 @@ func init() {
 	logging.skipHeaders = false
 	logging.addDirHeader = false
 	logging.skipLogHeaders = false
-	logging.skipSeverityHeaders = false
-	logging.skipTimeHeaders = false
-	logging.skipPidHeaders = false
 	go logging.flushDaemon()
 }
 
@@ -435,9 +432,6 @@ func InitFlags(flagset *flag.FlagSet) {
 	flagset.Var(&logging.verbosity, "v", "number for the log level verbosity")
 	flagset.BoolVar(&logging.addDirHeader, "add_dir_header", logging.addDirHeader, "If true, adds the file directory to the header of the log messages")
 	flagset.BoolVar(&logging.skipHeaders, "skip_headers", logging.skipHeaders, "If true, avoid header prefixes in the log messages")
-	flagset.BoolVar(&logging.skipSeverityHeaders, "skip_severity_headers", logging.skipSeverityHeaders, "If true, avoid severity header prefixes in the log messages")
-	flagset.BoolVar(&logging.skipTimeHeaders, "skip_time_headers", logging.skipTimeHeaders, "If true, avoid time header prefixes in the log messages")
-	flagset.BoolVar(&logging.skipPidHeaders, "skip_pid_headers", logging.skipPidHeaders, "If true, avoid header pid prefixes in the log messages")
 	flagset.BoolVar(&logging.skipLogHeaders, "skip_log_headers", logging.skipLogHeaders, "If true, avoid headers when opening log files")
 	flagset.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flagset.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
@@ -502,15 +496,6 @@ type loggingT struct {
 
 	// If true, do not add the prefix headers, useful when used with SetOutput
 	skipHeaders bool
-
-	// If true, do not add the serverity headers to log files
-	skipSeverityHeaders bool
-
-	// If true, do not add the time headers to log files
-	skipTimeHeaders bool
-
-	// If true, do not add the pid headers to log files
-	skipPidHeaders bool
 
 	// If true, do not add the headers to log files
 	skipLogHeaders bool
@@ -600,7 +585,7 @@ where the fields are defined as follows:
 	msg              The user-supplied message
 */
 func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
-	pc, file, line, ok := runtime.Caller(3 + depth)
+	_, file, line, ok := runtime.Caller(3 + depth)
 	if !ok {
 		file = "???"
 		line = 1
@@ -615,23 +600,7 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 			}
 		}
 	}
-	frames := runtime.CallersFrames([]uintptr{pc})
-	frame, _ := frames.Next()
-	return l.addFuncToHeader(l.formatHeader(s, file, line), stripUrl(frame.Function)), file, line
-}
-
-func stripUrl(str string) string {
-	if i := strings.LastIndexByte(str, '/'); i != -1 {
-		if str[i+1] == 'v' || str[i+1] == 'V' {
-			j := strings.LastIndexByte(str[i+2:], '.')
-			if _, err := strconv.Atoi(str[i+2 : i+j+1]); err != nil {
-				for i = i - 1; i > 0 && str[i] != '/'; i-- {
-				}
-			}
-		}
-		return str[i+1:]
-	}
-	return str
+	return l.formatHeader(s, file, line), file, line
 }
 
 // formatHeader formats a log header using the provided file name and line number.
@@ -653,55 +622,27 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	_, month, day := now.Date()
 	hour, minute, second := now.Clock()
 	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
-	n := 0
-	if !l.skipSeverityHeaders {
-		buf.tmp[0] = severityChar[s]
-		buf.twoDigits(1, int(month))
-		buf.twoDigits(3, day)
-		buf.tmp[5] = ' '
-		n += 6
-	}
-	if !l.skipTimeHeaders {
-		buf.twoDigits(n, hour)
-		n += 2
-		buf.tmp[n] = ':'
-		n += 1
-		buf.twoDigits(n, minute)
-		n += 2
-		buf.tmp[n] = ':'
-		n += 1
-		buf.twoDigits(n, second)
-		n += 2
-		buf.tmp[n] = '.'
-		n += 1
-		buf.nDigits(n, 15, now.Nanosecond()/1000, '0')
-		n += 6
-		buf.tmp[n] = ' '
-		n += 1
-	}
-	if !l.skipPidHeaders {
-		buf.nDigits(7, n, pid, ' ') // TODO: should be TID
-		n += 7
-		buf.tmp[n] = ' '
-		n += 1
-	}
-	buf.Write(buf.tmp[:n])
+	buf.tmp[0] = severityChar[s]
+	buf.twoDigits(1, int(month))
+	buf.twoDigits(3, day)
+	buf.tmp[5] = ' '
+	buf.twoDigits(6, hour)
+	buf.tmp[8] = ':'
+	buf.twoDigits(9, minute)
+	buf.tmp[11] = ':'
+	buf.twoDigits(12, second)
+	buf.tmp[14] = '.'
+	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
+	buf.tmp[21] = ' '
+	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
+	buf.tmp[29] = ' '
+	buf.Write(buf.tmp[:30])
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
-	n = buf.someDigits(1, line)
+	n := buf.someDigits(1, line)
 	buf.tmp[n+1] = ']'
 	buf.tmp[n+2] = ' '
 	buf.Write(buf.tmp[:n+3])
-	return buf
-}
-
-func (l *loggingT) addFuncToHeader(buf *buffer, function string) *buffer {
-	buf.Truncate(buf.Len() - 2)
-	buf.tmp[0] = ' '
-	buf.ncopy(1, 32, function)
-	buf.tmp[33] = ']'
-	buf.tmp[34] = ' '
-	buf.Write(buf.tmp[:35])
 	return buf
 }
 
@@ -727,17 +668,6 @@ func (buf *buffer) nDigits(n, i, d int, pad byte) {
 	}
 	for ; j >= 0; j-- {
 		buf.tmp[i+j] = pad
-	}
-}
-
-func (buf *buffer) ncopy(beg, lim int, str string) {
-	index := 0
-	for ; index < lim && index < len(str); index++ {
-		buf.tmp[beg+index] = str[index]
-	}
-	for index < lim {
-		index += 1
-		buf.tmp[index] = ' '
 	}
 }
 
@@ -1390,7 +1320,7 @@ func (v Verbose) Infof(format string, args ...interface{}) {
 // See the documentation of V for usage.
 func (v Verbose) InfoS(msg string, keysAndValues ...interface{}) {
 	if v.enabled {
-		logging.infoS(v.logr, msg, keysAndValues...)
+		logging.infoS(v.logr, msg, keysAndValues)
 	}
 }
 
